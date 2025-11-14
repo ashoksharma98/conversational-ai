@@ -16,7 +16,7 @@ class TTSService:
         """No model loading needed for Edge TTS"""
         logger.info("Edge TTS ready")
     
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize(self, text: str, progress_callback=None) -> bytes:
         """
         Convert text to speech using Edge TTS
         
@@ -37,6 +37,9 @@ class TTSService:
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
                     audio_data.write(chunk["data"])
+                    # Send progress update if callback provided
+                    if progress_callback:
+                        await progress_callback()
             
             audio_bytes = audio_data.getvalue()
             logger.info(f"Speech synthesized successfully, size: {len(audio_bytes)} bytes")

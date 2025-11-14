@@ -59,6 +59,17 @@ async def websocket_conversation(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connection established")
     
+    # Add periodic ping to keep connection alive
+    async def send_ping():
+        while True:
+            try:
+                await asyncio.sleep(20)  # Send ping every 20 seconds
+                await websocket.send_json({"type": "ping"})
+            except:
+                break
+    
+    ping_task = asyncio.create_task(send_ping())
+    
     try:
         while True:
             # Receive audio data from client
@@ -110,8 +121,22 @@ async def websocket_conversation(websocket: WebSocket):
                     "status": "processing",
                     "stage": "generating_response"
                 })
+
+                # Create a progress callback for LLM
+                last_llm_update = asyncio.get_event_loop().time()
+
+                async def llm_progress_callback():
+                    nonlocal last_llm_update
+                    current_time = asyncio.get_event_loop().time()
+                    if current_time - last_llm_update > 3:
+                        await websocket.send_json({
+                            "status": "processing",
+                            "stage": "generating_response",
+                            "keepalive": True
+                        })
+                        last_llm_update = current_time
                 
-                llm_response = await llm_service.generate_response(transcription)
+                llm_response = await llm_service.generate_response(transcription, progress_callback=llm_progress_callback)
                 logger.info(f"LLM Response: {llm_response}")
                 
                 # Send LLM response to client
@@ -135,18 +160,51 @@ async def websocket_conversation(websocket: WebSocket):
                     "status": "processing",
                     "stage": "synthesizing_speech"
                 })
-                
-                audio_response = await tts_service.synthesize(llm_response)
+
+                # Create a progress callback to send keepalive messages during TTS
+                last_update = asyncio.get_event_loop().time()
+
+                async def tts_progress_callback():
+                    nonlocal last_update
+                    current_time = asyncio.get_event_loop().time()
+                    # Send update every 3 seconds during synthesis
+                    if current_time - last_update > 3:
+                        await websocket.send_json({
+                            "status": "processing",
+                            "stage": "synthesizing_speech",
+                            "keepalive": True
+                        })
+                        last_update = current_time
+                            
+                audio_response = await tts_service.synthesize(llm_response, progress_callback=tts_progress_callback)
                 logger.info(f"TTS generated: {len(audio_response)} bytes")
-                
-                # Send audio response to client
-                await websocket.send_json({
-                    "status": "audio_ready",
-                    "audio_size": len(audio_response)
-                })
-                
-                # Stream audio back to client
-                await websocket.send_bytes(audio_response)
+
+                # Send audio response to client in chunks if too large
+                CHUNK_SIZE = 512 * 1024  # 512KB chunks
+
+                if len(audio_response) > CHUNK_SIZE:
+                    # Send metadata about chunked audio
+                    num_chunks = (len(audio_response) + CHUNK_SIZE - 1) // CHUNK_SIZE
+                    await websocket.send_json({
+                        "status": "audio_ready",
+                        "audio_size": len(audio_response),
+                        "chunked": True,
+                        "num_chunks": num_chunks
+                    })
+
+                    # Send audio in chunks
+                    for i in range(0, len(audio_response), CHUNK_SIZE):
+                        chunk = audio_response[i:i + CHUNK_SIZE]
+                        await websocket.send_bytes(chunk)
+                        logger.info(f"Sent chunk {i // CHUNK_SIZE + 1}/{num_chunks}")
+                else:
+                    # Send as single message if small enough
+                    await websocket.send_json({
+                        "status": "audio_ready",
+                        "audio_size": len(audio_response),
+                        "chunked": False
+                    })
+                    await websocket.send_bytes(audio_response)
                 
                 # Send completion status
                 await websocket.send_json({
@@ -174,8 +232,27 @@ async def websocket_conversation(websocket: WebSocket):
         except:
             pass
     finally:
+        ping_task.cancel()
         logger.info("Cleaning up WebSocket connection")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        ws_max_size=16777216  # 16MB limit for WebSocket messages
+    )
+
+
+"""
+⏳ Processing: synthesizing_speech
+⏳ Processing: synthesizing_speech
+⏳ Processing: synthesizing_speech
+⏳ Processing: synthesizing_speech
+⏳ Processing: synthesizing_speech
+🎵 Audio ready (size: 1249344 bytes)
+❌ Error receiving message: sent 1009 (message too big) frame with 1101757 bytes exceeds limit of 1048576 bytes; no close frame received
+❌ Error receiving message: received 1011 (internal error) keepalive ping timeout; then sent 1011 (internal error) keepalive ping timeout
+❌ Error receiving message: sent 1011 (internal error) keepalive ping timeout; no close frame received
+"""

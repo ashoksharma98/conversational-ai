@@ -53,7 +53,7 @@ class ConversationalAIClient:
         return wav_buffer.getvalue()
     
     def play_audio(self, audio_data: bytes):
-        """Play audio response from bytes"""
+        """Play audio response from bytes using PyAudio"""
         print("\n🔊 Playing response...")
         
         try:
@@ -62,12 +62,48 @@ class ConversationalAIClient:
                 temp_audio.write(audio_data)
                 temp_audio_path = temp_audio.name
             
-            # Play using pydub and simpleaudio
-            from pydub import AudioSegment
-            from pydub.playback import play
-            
-            audio = AudioSegment.from_file(temp_audio_path)
-            play(audio)
+            # Convert MP3 to WAV using pydub, then play with PyAudio
+            try:
+                from pydub import AudioSegment
+                
+                # Load MP3 and convert to WAV
+                audio = AudioSegment.from_mp3(temp_audio_path)
+                
+                # Export to WAV in memory
+                wav_buffer = BytesIO()
+                audio.export(wav_buffer, format="wav")
+                wav_buffer.seek(0)
+                
+                # Play using PyAudio
+                with wave.open(wav_buffer, 'rb') as wf:
+                    stream = self.audio.open(
+                        format=self.audio.get_format_from_width(wf.getsampwidth()),
+                        channels=wf.getnchannels(),
+                        rate=wf.getframerate(),
+                        output=True
+                    )
+                    
+                    # Read and play audio in chunks
+                    data = wf.readframes(CHUNK)
+                    while data:
+                        stream.write(data)
+                        data = wf.readframes(CHUNK)
+                    
+                    stream.stop_stream()
+                    stream.close()
+                
+            except ImportError:
+                # Fallback: use pygame for MP3 playback
+                import pygame
+                pygame.mixer.init()
+                pygame.mixer.music.load(temp_audio_path)
+                pygame.mixer.music.play()
+                
+                # Wait for playback to finish
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)
+                
+                pygame.mixer.quit()
             
             # Cleanup
             os.unlink(temp_audio_path)
@@ -75,6 +111,7 @@ class ConversationalAIClient:
             
         except Exception as e:
             print(f"❌ Error playing audio: {e}")
+            print("💡 Tip: Install pydub and ffmpeg, or pygame for audio playback")
     
     async def run_conversation(self):
         """Main conversation loop"""
@@ -99,19 +136,35 @@ class ConversationalAIClient:
                 
                 # Receive responses
                 audio_response = None
+                audio_chunks = []
+                is_chunked = False
+                num_chunks = 0
                 while True:
                     try:
                         message = await asyncio.wait_for(websocket.recv(), timeout=30.0)
                         
                         # Check if it's JSON or binary
                         if isinstance(message, bytes):
-                            # This is the audio response
-                            audio_response = message
-                            print(f"📥 Received audio response ({len(audio_response)} bytes)")
+                            # This is audio data
+                            if is_chunked:
+                                audio_chunks.append(message)
+                                print(f"📥 Received audio chunk {len(audio_chunks)}/{num_chunks}")
+
+                                # Check if we've received all chunks
+                                if len(audio_chunks) == num_chunks:
+                                    audio_response = b''.join(audio_chunks)
+                                    print(f"✅ All audio chunks received ({len(audio_response)} bytes)")
+                            else:
+                                audio_response = message
+                                print(f"📥 Received audio response ({len(audio_response)} bytes)")
                             
                         else:
                             # This is a JSON status message
                             status = json.loads(message)
+                            
+                            # Ignore ping messages
+                            if status.get("type") == "ping":
+                                continue
                             
                             if status["status"] == "transcribed":
                                 print(f"📝 You said: {status['transcription']}")
@@ -121,10 +174,19 @@ class ConversationalAIClient:
                                 
                             elif status["status"] == "processing":
                                 stage = status.get("stage", "")
-                                print(f"⏳ Processing: {stage}")
+                                if not status.get("keepalive"):  # Don't spam keepalive messages
+                                    print(f"⏳ Processing: {stage}")
                                 
                             elif status["status"] == "audio_ready":
-                                print(f"🎵 Audio ready (size: {status['audio_size']} bytes)")
+                                audio_size = status['audio_size']
+                                is_chunked = status.get('chunked', False)
+                                num_chunks = status.get('num_chunks', 0)
+
+                                if is_chunked:
+                                    print(f"🎵 Audio ready (size: {audio_size} bytes, {num_chunks} chunks)")
+                                    audio_chunks = []  # Reset chunks list
+                                else:
+                                    print(f"🎵 Audio ready (size: {audio_size} bytes)")
                                 
                             elif status["status"] == "completed":
                                 print("✅ Conversation turn completed!")
