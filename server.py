@@ -28,7 +28,7 @@ app.add_middleware(
 
 # Initialize services (you'll need to provide API keys)
 stt_service = STTService(model_name="base")
-llm_service = LLMService(api_key="")
+llm_service = LLMService(api_key="AIzaSyBmkjkJTuwmixHyOTsHXLzNF9-c5ZnpIwo")
 tts_service = TTSService(voice="en-US-AriaNeural")
 
 @app.on_event("startup")
@@ -58,6 +58,17 @@ async def websocket_conversation(websocket: WebSocket):
     """
     await websocket.accept()
     logger.info("WebSocket connection established")
+    
+    # Add periodic ping to keep connection alive
+    async def send_ping():
+        while True:
+            try:
+                await asyncio.sleep(20)  # Send ping every 20 seconds
+                await websocket.send_json({"type": "ping"})
+            except:
+                break
+    
+    ping_task = asyncio.create_task(send_ping())
     
     try:
         while True:
@@ -135,8 +146,23 @@ async def websocket_conversation(websocket: WebSocket):
                     "status": "processing",
                     "stage": "synthesizing_speech"
                 })
-                
-                audio_response = await tts_service.synthesize(llm_response)
+
+                # Create a progress callback to send keepalive messages during TTS
+                last_update = asyncio.get_event_loop().time()
+
+                async def tts_progress_callback():
+                    nonlocal last_update
+                    current_time = asyncio.get_event_loop().time()
+                    # Send update every 3 seconds during synthesis
+                    if current_time - last_update > 3:
+                        await websocket.send_json({
+                            "status": "processing",
+                            "stage": "synthesizing_speech",
+                            "keepalive": True
+                        })
+                        last_update = current_time
+                            
+                audio_response = await tts_service.synthesize(llm_response, progress_callback=tts_progress_callback)
                 logger.info(f"TTS generated: {len(audio_response)} bytes")
                 
                 # Send audio response to client
@@ -174,8 +200,21 @@ async def websocket_conversation(websocket: WebSocket):
         except:
             pass
     finally:
+        ping_task.cancel()
         logger.info("Cleaning up WebSocket connection")
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+"""
+⏳ Processing: synthesizing_speech
+⏳ Processing: synthesizing_speech
+⏳ Processing: synthesizing_speech
+⏳ Processing: synthesizing_speech
+⏳ Processing: synthesizing_speech
+🎵 Audio ready (size: 1249344 bytes)
+❌ Error receiving message: sent 1009 (message too big) frame with 1101757 bytes exceeds limit of 1048576 bytes; no close frame received
+❌ Error receiving message: received 1011 (internal error) keepalive ping timeout; then sent 1011 (internal error) keepalive ping timeout
+"""
