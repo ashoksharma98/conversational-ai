@@ -136,15 +136,27 @@ class ConversationalAIClient:
                 
                 # Receive responses
                 audio_response = None
+                audio_chunks = []
+                is_chunked = False
+                num_chunks = 0
                 while True:
                     try:
                         message = await asyncio.wait_for(websocket.recv(), timeout=30.0)
                         
                         # Check if it's JSON or binary
                         if isinstance(message, bytes):
-                            # This is the audio response
-                            audio_response = message
-                            print(f"📥 Received audio response ({len(audio_response)} bytes)")
+                            # This is audio data
+                            if is_chunked:
+                                audio_chunks.append(message)
+                                print(f"📥 Received audio chunk {len(audio_chunks)}/{num_chunks}")
+
+                                # Check if we've received all chunks
+                                if len(audio_chunks) == num_chunks:
+                                    audio_response = b''.join(audio_chunks)
+                                    print(f"✅ All audio chunks received ({len(audio_response)} bytes)")
+                            else:
+                                audio_response = message
+                                print(f"📥 Received audio response ({len(audio_response)} bytes)")
                             
                         else:
                             # This is a JSON status message
@@ -162,10 +174,19 @@ class ConversationalAIClient:
                                 
                             elif status["status"] == "processing":
                                 stage = status.get("stage", "")
-                                print(f"⏳ Processing: {stage}")
+                                if not status.get("keepalive"):  # Don't spam keepalive messages
+                                    print(f"⏳ Processing: {stage}")
                                 
                             elif status["status"] == "audio_ready":
-                                print(f"🎵 Audio ready (size: {status['audio_size']} bytes)")
+                                audio_size = status['audio_size']
+                                is_chunked = status.get('chunked', False)
+                                num_chunks = status.get('num_chunks', 0)
+
+                                if is_chunked:
+                                    print(f"🎵 Audio ready (size: {audio_size} bytes, {num_chunks} chunks)")
+                                    audio_chunks = []  # Reset chunks list
+                                else:
+                                    print(f"🎵 Audio ready (size: {audio_size} bytes)")
                                 
                             elif status["status"] == "completed":
                                 print("✅ Conversation turn completed!")
