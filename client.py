@@ -1,0 +1,167 @@
+# client.py
+import asyncio
+import websockets
+import json
+import pyaudio
+import wave
+import tempfile
+import os
+from io import BytesIO
+
+# Audio recording parameters
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+RECORD_SECONDS = 5  # Record for 5 seconds
+
+class ConversationalAIClient:
+    def __init__(self, websocket_url: str = "ws://localhost:8000/ws/conversation"):
+        self.websocket_url = websocket_url
+        self.audio = pyaudio.PyAudio()
+        
+    def record_audio(self) -> bytes:
+        """Record audio from microphone and return WAV bytes"""
+        print("\n🎤 Recording... Speak now!")
+        
+        stream = self.audio.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            frames_per_buffer=CHUNK
+        )
+        
+        frames = []
+        for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+            data = stream.read(CHUNK)
+            frames.append(data)
+        
+        print("✅ Recording finished!")
+        
+        stream.stop_stream()
+        stream.close()
+        
+        # Convert to WAV format in memory
+        wav_buffer = BytesIO()
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(self.audio.get_sample_size(FORMAT))
+            wf.setframerate(RATE)
+            wf.writeframes(b''.join(frames))
+        
+        return wav_buffer.getvalue()
+    
+    def play_audio(self, audio_data: bytes):
+        """Play audio response from bytes"""
+        print("\n🔊 Playing response...")
+        
+        try:
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_audio:
+                temp_audio.write(audio_data)
+                temp_audio_path = temp_audio.name
+            
+            # Play using pydub and simpleaudio
+            from pydub import AudioSegment
+            from pydub.playback import play
+            
+            audio = AudioSegment.from_file(temp_audio_path)
+            play(audio)
+            
+            # Cleanup
+            os.unlink(temp_audio_path)
+            print("✅ Playback finished!")
+            
+        except Exception as e:
+            print(f"❌ Error playing audio: {e}")
+    
+    async def run_conversation(self):
+        """Main conversation loop"""
+        print(f"🔗 Connecting to {self.websocket_url}...")
+        
+        async with websockets.connect(self.websocket_url) as websocket:
+            print("✅ Connected to server!\n")
+            
+            while True:
+                # Ask user if they want to speak
+                user_input = input("Press ENTER to speak (or 'q' to quit): ")
+                if user_input.lower() == 'q':
+                    print("👋 Goodbye!")
+                    break
+                
+                # Record audio
+                audio_data = self.record_audio()
+                print(f"📤 Sending audio data ({len(audio_data)} bytes)...")
+                
+                # Send audio to server
+                await websocket.send(audio_data)
+                
+                # Receive responses
+                audio_response = None
+                while True:
+                    try:
+                        message = await asyncio.wait_for(websocket.recv(), timeout=30.0)
+                        
+                        # Check if it's JSON or binary
+                        if isinstance(message, bytes):
+                            # This is the audio response
+                            audio_response = message
+                            print(f"📥 Received audio response ({len(audio_response)} bytes)")
+                            
+                        else:
+                            # This is a JSON status message
+                            status = json.loads(message)
+                            
+                            if status["status"] == "transcribed":
+                                print(f"📝 You said: {status['transcription']}")
+                                
+                            elif status["status"] == "response_generated":
+                                print(f"💬 AI response: {status['response']}")
+                                
+                            elif status["status"] == "processing":
+                                stage = status.get("stage", "")
+                                print(f"⏳ Processing: {stage}")
+                                
+                            elif status["status"] == "audio_ready":
+                                print(f"🎵 Audio ready (size: {status['audio_size']} bytes)")
+                                
+                            elif status["status"] == "completed":
+                                print("✅ Conversation turn completed!")
+                                break
+                                
+                            elif status["status"] == "error":
+                                print(f"❌ Error at {status.get('stage', 'unknown')}: {status.get('message', 'Unknown error')}")
+                                break
+                    
+                    except asyncio.TimeoutError:
+                        print("⏰ Timeout waiting for response")
+                        break
+                    except Exception as e:
+                        print(f"❌ Error receiving message: {e}")
+                        break
+                
+                # Play audio response if received
+                if audio_response:
+                    self.play_audio(audio_response)
+                
+                print("\n" + "="*50 + "\n")
+    
+    def cleanup(self):
+        """Cleanup resources"""
+        self.audio.terminate()
+
+async def main():
+    client = ConversationalAIClient()
+    
+    try:
+        await client.run_conversation()
+    except KeyboardInterrupt:
+        print("\n\n👋 Interrupted by user")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+    finally:
+        client.cleanup()
+
+if __name__ == "__main__":
+    asyncio.run(main())
