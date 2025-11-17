@@ -28,7 +28,7 @@ app.add_middleware(
 
 # Initialize services (you'll need to provide API keys)
 stt_service = STTService(model_name="base")
-llm_service = LLMService(api_key="")
+llm_service = LLMService(api_key="AIzaSyBmkjkJTuwmixHyOTsHXLzNF9-c5ZnpIwo")
 tts_service = TTSService(voice="en-US-AriaNeural")
 
 @app.on_event("startup")
@@ -63,7 +63,7 @@ async def websocket_conversation(websocket: WebSocket):
     async def send_ping():
         while True:
             try:
-                await asyncio.sleep(20)  # Send ping every 20 seconds
+                await asyncio.sleep(10)  # Send ping every 10 seconds
                 await websocket.send_json({"type": "ping"})
             except:
                 break
@@ -92,9 +92,41 @@ async def websocket_conversation(websocket: WebSocket):
                 # Read the WAV file for transcription
                 with open(temp_wav_path, 'rb') as f:
                     wav_bytes = f.read()
-                
-                # Transcribe using STT
-                transcription = await stt_service.transcribe(wav_bytes)
+
+                # Create a progress callback for STT
+                last_stt_update = asyncio.get_event_loop().time()
+
+                async def stt_progress_callback():
+                    nonlocal last_stt_update
+                    current_time = asyncio.get_event_loop().time()
+                    if current_time - last_stt_update > 2:
+                        await websocket.send_json({
+                            "status": "processing",
+                            "stage": "transcribing",
+                            "keepalive": True
+                        })
+                        last_stt_update = current_time
+
+                # Create task to send keepalive during STT
+                async def stt_with_keepalive():
+                    keepalive_task = asyncio.create_task(send_periodic_keepalive(stt_progress_callback))
+                    try:
+                        result = await stt_service.transcribe(wav_bytes)
+                        return result
+                    finally:
+                        keepalive_task.cancel()
+                        try:
+                            await keepalive_task
+                        except asyncio.CancelledError:
+                            pass
+
+                async def send_periodic_keepalive(callback):
+                    while True:
+                        await asyncio.sleep(2)
+                        await callback()
+
+                # Transcribe using STT with keepalive
+                transcription = await stt_with_keepalive()
                 logger.info(f"Transcription: {transcription}")
                 
                 # Cleanup temp file
