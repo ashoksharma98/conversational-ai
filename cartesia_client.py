@@ -256,11 +256,10 @@ class ConversationalAIClient:
 
                             await websocket.send(audio_data)
 
-                            audio_response = None
+                            playback_task = None
 
                             while True:
                                 try:
-                                    playback_task = None
                                     message = await asyncio.wait_for(websocket.recv(), timeout=60.0)
 
                                     if isinstance(message, bytes):
@@ -286,12 +285,6 @@ class ConversationalAIClient:
 
                                         elif status["status"] == "completed":
                                             print("✅ Conversation turn completed!")
-
-                                            # Wait for playback to finish before continuing
-                                            if 'playback_task' in locals():
-                                                print("⏳ Waiting for playback to finish...")
-                                                await playback_task
-
                                             break
 
                                         elif status["status"] == "error":
@@ -300,11 +293,12 @@ class ConversationalAIClient:
                                 except asyncio.TimeoutError:
                                     print("⏰ Timeout waiting for response")
                                     break
-                            # Play audio response if received
-                            # if audio_response:
-                            #     self.play_audio(audio_response)
+                            # AFTER exiting the loop, wait for playback
+                            if playback_task:
+                                print("⏳ Waiting for playback to finish...")
+                                await playback_task
 
-                                print("\n" + "=" * 50 + "\n")
+                            print("\n" + "=" * 50 + "\n")
                         except websockets.exceptions.ConnectionClosed:
                             print("⚠️ Connection closed, reconnecting...")
                             raise

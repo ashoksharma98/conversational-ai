@@ -42,7 +42,7 @@ async def websocket_conversation(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connected")
 
-    cartesia_service = CartesiaService()
+    cartesia_service = CartesiaService(api_key=os.getenv('CARTESIA_API_KEY'))
     llm = LLMService(api_key=os.getenv('GEMINI_API_KEY'))
 
     while True:

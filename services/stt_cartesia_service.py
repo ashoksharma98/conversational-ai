@@ -9,10 +9,10 @@ logger = logging.getLogger(__name__)
 
 
 class CartesiaService:
-    def __init__(self):
+    def __init__(self, api_key: str):
         self._stt_url = 'https://api.cartesia.ai/stt'
         self._tts_url = 'https://api.cartesia.ai/tts/bytes'
-        self._headers = { 'Authorization': 'Bearer <API Key>', 'Cartesia-Version': '2025-04-16' }
+        self._headers = { 'Authorization': f'Bearer {api_key}', 'Cartesia-Version': '2025-04-16' }
 
     def transcribe(self, wav_bytes: bytes) -> dict:
         try:
